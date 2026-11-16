@@ -5,6 +5,12 @@
 // that grows with distance and target speed, so bots feel fair rather than
 // aimbot-perfect. A difficulty object (from rounds.difficultyFor) scales
 // reaction time, skill and walk speed, so later rounds play harder.
+// Objective work is committed: a bot planting, defusing, or rotating to the
+// charge does not stop to fight — it finishes the job or dies trying — so a
+// plant or defuse can never stall forever. When the charge is dropped, the
+// nearest attacker fetches it; when it is planted, defenders converge on the
+// site from two doors (a flank) while the other attackers push up to cover
+// it. A hurt, outnumbered bot falls back to regroup, then pushes again.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { WEAPONS } from './weapons.js';
@@ -89,14 +95,22 @@ function makeBody(team, name) {
   legL.position.set(-0.14, 0.3, 0);
   const legR = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.22), darkMat);
   legR.position.set(0.14, 0.3, 0);
-  group.add(torso, chest, head, helmet, gun, legL, legR);
+  // Carrier beacon: a small cyan diamond above the head, visible only
+  // while this bot carries the charge, so the player can find and escort it.
+  const marker = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.22),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.cyan) }),
+  );
+  marker.position.y = 2.25;
+  marker.visible = false;
+  group.add(torso, chest, head, helmet, gun, legL, legR, marker);
   group.traverse((m) => {
     if (m.isMesh) {
       m.castShadow = true;
       m.userData.botName = name;
     }
   });
-  return { group, torso, head };
+  return { group, torso, head, marker };
 }
 
 export function createBotManager(scene, world, ctx) {
@@ -107,7 +121,7 @@ export function createBotManager(scene, world, ctx) {
   let difficulty = { reactionScale: 1, skillBonus: 0, surgeSpeed: 1 };
 
   function spawnBot(def) {
-    const { group, torso, head } = makeBody(def.team, def.name);
+    const { group, torso, head, marker } = makeBody(def.team, def.name);
     group.position.set(def.spawn.x, 0, def.spawn.z);
     scene.add(group);
     const bot = {
@@ -115,15 +129,28 @@ export function createBotManager(scene, world, ctx) {
       group,
       torso,
       head,
+      marker,
+      baseColor: def.team === 'ORBIT' ? PALETTE.teamBlue : PALETTE.teamRed,
+      flashUntil: 0,
+      flashing: false,
       pos: group.position,
       yaw: def.team === 'ORBIT' ? 0 : Math.PI,
       pitch: 0,
       health: 100,
       alive: true,
+      carriesBomb: false,
       weapon: WEAPONS[def.weaponId || 'rifle'],
       state: def.team === 'ORBIT' ? 'advance' : 'hold',
       site: def.site,
       holdPos: new THREE.Vector3(def.spawn.x, 0, def.spawn.z),
+      // Fallback point when outnumbered and hurt: defenders drop back
+      // behind their site, attackers regroup at the south spawn.
+      retreatPos: def.team === 'UMBRA'
+        ? new THREE.Vector3(def.site === 'A' ? -18 : 18, 0, -14)
+        : new THREE.Vector3(0, 0, 14),
+      hasRetreated: false,
+      holdUntil: 0,
+      outnumbered: false,
       path: [],
       pathIndex: 0,
       target: null,
@@ -246,6 +273,20 @@ export function createBotManager(scene, world, ctx) {
     }
   }
 
+  // Ray vs sphere: distance along the ray to the sphere, or null.
+  // The player has no mesh, so bot shots at the player are tested against
+  // two spheres (head, body) instead of the raycaster.
+  function raySphere(from, dir, center, radius) {
+    const ox = center.x - from.x;
+    const oy = center.y - from.y;
+    const oz = center.z - from.z;
+    const tca = ox * dir.x + oy * dir.y + oz * dir.z;
+    if (tca < 0) return null;
+    const d2 = ox * ox + oy * oy + oz * oz - tca * tca;
+    if (d2 > radius * radius) return null;
+    return tca - Math.sqrt(radius * radius - d2);
+  }
+
   function shootAt(bot) {
     if (!bot.target || bot.reaction > 0) return;
     if (bot.burstTimer > 0) return;
@@ -264,7 +305,21 @@ export function createBotManager(scene, world, ctx) {
     const muzzle = from.clone().add(dir.clone().multiplyScalar(0.7));
     ctx.onBotShot(bot, muzzle, dir, dist);
     const hit = ctx.raycast(from, dir, 60);
-    if (hit && hit.botName) {
+    if (target.isPlayer) {
+      // The player has no mesh, so the raycaster can never hit them — test
+      // the ray against the player's head/body spheres instead. A wall or
+      // another bot closer than the player still blocks the shot.
+      const head = raySphere(from, dir, new THREE.Vector3(target.pos.x, target.pos.y + 1.62, target.pos.z), 0.22);
+      const body = raySphere(from, dir, new THREE.Vector3(target.pos.x, target.pos.y + 0.95, target.pos.z), 0.42);
+      const wallDist = hit && !hit.botName ? hit.distance : Infinity;
+      const botDist = hit && hit.botName ? hit.distance : Infinity;
+      const playerDist = head !== null ? head : body;
+      if (playerDist !== null && playerDist < wallDist && playerDist < botDist) {
+        const headshot = head !== null;
+        const damage = headshot ? bot.weapon.headDamage : bot.weapon.damage;
+        ctx.onDamage(target, damage, headshot, bot);
+      }
+    } else if (hit && hit.botName) {
       const headshot = hit.objectName.startsWith('head:');
       const damage = headshot ? bot.weapon.headDamage : bot.weapon.damage;
       ctx.onDamage(target, damage, headshot, bot);
@@ -283,9 +338,63 @@ export function createBotManager(scene, world, ctx) {
     bot.reaction = Math.max(0, bot.reaction - dt);
     bot.burstTimer = Math.max(0, bot.burstTimer - dt);
 
-    const engaging = bot.target && bot.reaction <= 0;
+    // The carrier's job is to get the charge to the site: while it is
+    // advancing it does not stop to fight — its teammates cover it — or it
+    // would never reach the site at all (v1's carrier fought every defender
+    // it saw and never planted).
+    const engaging = bot.target && bot.reaction <= 0
+      && !(bot.carriesBomb && bot.state === 'advance');
     const speed = WALK_SPEED * (difficulty.surgeSpeed || 1);
-    if (engaging) {
+    // A bot that is hurt and outnumbered falls back instead of fighting to
+    // the death — once per round, and never while it is working the charge.
+    if (
+      bot.health <= 35 && bot.outnumbered && !bot.hasRetreated
+      && (bot.state === 'advance' || bot.state === 'rotate' || bot.state === 'hold')
+      && !bot.defuseOnArrival && !bot.pickupOnArrival
+    ) {
+      bot.hasRetreated = true;
+      bot.state = 'retreat';
+      bot.holdUntil = 0;
+      setPath(bot, bot.retreatPos.x, bot.retreatPos.z);
+    }
+
+    if (bot.state === 'plant') {
+      // Committed: planting is not interrupted by spotting an enemy — the
+      // bot finishes the plant or dies trying. It cannot shoot while it works.
+      bot.plantProgress += dt;
+      if (bot.plantProgress >= 3.2) {
+        bot.state = 'hold';
+        ctx.onPlant(bot);
+      }
+    } else if (bot.state === 'defuse') {
+      // Committed, like planting.
+      bot.defuseProgress += dt;
+      if (bot.defuseProgress >= 5) {
+        bot.state = 'hold';
+        ctx.onDefuse(bot);
+      }
+    } else if (bot.state === 'retreat') {
+      // Committed: keep falling back even while shot at.
+      const done = moveAlong(bot, dt, speed);
+      if (done) {
+        bot.state = 'hold';
+        bot.holdPos.copy(bot.pos);
+        bot.holdUntil = ctx.now + 4;
+      }
+    } else if (bot.state === 'rotate' && (bot.defuseOnArrival || bot.pickupOnArrival)) {
+      // Committed: rotating to the charge to defuse it or pick it up.
+      const done = moveAlong(bot, dt, speed);
+      if (done) {
+        if (bot.pickupOnArrival) {
+          bot.pickupOnArrival = false;
+          ctx.onPickup(bot);
+        } else if (bot.defuseOnArrival) {
+          bot.state = 'defuse';
+          bot.defuseProgress = 0;
+          bot.defuseOnArrival = false;
+        }
+      }
+    } else if (engaging) {
       faceTarget(bot, dt, bot.lastSeen);
       // Strafe sideways while fighting, keep 8–20 m from the target.
       if (ctx.now > bot.strafeAt) {
@@ -312,33 +421,46 @@ export function createBotManager(scene, world, ctx) {
       bot.scanPhase += dt * 0.5;
       const want = Math.PI + Math.sin(bot.scanPhase) * 0.7;
       bot.yaw += clamp(angleDelta(bot.yaw, want), -dt * 1.2, dt * 1.2);
+      // A retreated attacker regroups, then pushes again.
+      if (bot.team === 'ORBIT' && bot.hasRetreated && bot.holdUntil && ctx.now >= bot.holdUntil) {
+        bot.holdUntil = 0;
+        bot.state = 'advance';
+        const site = world.sites[bot.site];
+        setPath(bot, site.x, site.z);
+      }
     } else if (bot.state === 'advance' || bot.state === 'rotate') {
       const done = moveAlong(bot, dt, speed);
       if (done) {
         if (bot.state === 'advance' && bot.carriesBomb) {
           bot.state = 'plant';
           bot.plantProgress = 0;
-        } else if (bot.state === 'rotate' && bot.defuseOnArrival) {
-          bot.state = 'defuse';
-          bot.defuseProgress = 0;
-          bot.defuseOnArrival = false;
+        } else if (bot.state === 'rotate' && bot.viaTarget) {
+          // Flank route: reached the far door, now push to the real target.
+          const target = bot.viaTarget;
+          bot.viaTarget = null;
+          setPath(bot, target.x, target.z);
         } else {
           bot.state = 'hold';
           bot.holdPos.copy(bot.pos);
         }
       }
-    } else if (bot.state === 'plant') {
-      bot.plantProgress += dt;
-      if (bot.plantProgress >= 3.2) {
-        bot.state = 'hold';
-        ctx.onPlant(bot);
+    }
+    // Stuck recovery: a bot grinding against an obstacle barely moves. If it
+    // has not moved 0.2 m in 3 s of game time, skip to the next path node so
+    // it routes around instead of wedging forever.
+    if (bot.state === 'advance' || bot.state === 'rotate' || bot.state === 'retreat') {
+      if (!bot.stuckPos) { bot.stuckPos = bot.pos.clone(); bot.stuckTime = 0; }
+      bot.stuckTime += dt;
+      if (bot.stuckTime >= 3) {
+        if (bot.pos.distanceTo(bot.stuckPos) < 0.2 && bot.path.length > 0) {
+          bot.pathIndex = Math.min(bot.pathIndex + 1, bot.path.length - 1);
+        }
+        bot.stuckPos.copy(bot.pos);
+        bot.stuckTime = 0;
       }
-    } else if (bot.state === 'defuse') {
-      bot.defuseProgress += dt;
-      if (bot.defuseProgress >= 5) {
-        bot.state = 'hold';
-        ctx.onDefuse(bot);
-      }
+    } else {
+      bot.stuckPos = null;
+      bot.stuckTime = 0;
     }
     bot.group.position.copy(bot.pos);
     bot.group.rotation.y = bot.yaw;
@@ -369,7 +491,22 @@ export function createBotManager(scene, world, ctx) {
     update(dt, player) {
       const attackers = bots.filter((b) => b.team === 'ORBIT');
       const defenders = bots.filter((b) => b.team === 'UMBRA');
+      const aliveOrbit = attackers.filter((b) => b.alive).length + (player.alive ? 1 : 0);
+      const aliveUmbra = defenders.filter((b) => b.alive).length;
       for (const bot of bots) {
+        // Outnumbered means two or more live enemies than live teammates.
+        const foes = bot.team === 'ORBIT' ? aliveUmbra : aliveOrbit;
+        const friends = bot.team === 'ORBIT' ? aliveOrbit : aliveUmbra;
+        bot.outnumbered = foes >= friends + 2;
+        // Hit flash: a bot that just took damage flashes white briefly.
+        const wantFlash = bot.alive && bot.flashUntil > ctx.now;
+        if (wantFlash !== bot.flashing) {
+          bot.flashing = wantFlash;
+          bot.torso.material.color.set(wantFlash ? 0xffffff : bot.baseColor);
+        }
+        // Carrier beacon: spin the diamond above whoever holds the charge.
+        bot.marker.visible = bot.alive && bot.carriesBomb === true;
+        if (bot.marker.visible) bot.marker.rotation.y += dt * 4;
         // The player fights for ORBIT, so only UMBRA bots count them as an enemy.
         const enemies = bot.team === 'ORBIT' ? defenders : [...attackers, player];
         updateBot(bot, dt, enemies);
@@ -417,11 +554,23 @@ export function createBotManager(scene, world, ctx) {
       }
     },
     rotateToSite(siteKey) {
+      // Defenders converge on the planted site — but not all through the
+      // same door: every other bot flanks via the far door, so the site is
+      // hit from two sides at once.
+      const farDoor = siteKey === 'A' ? { x: 7, z: -4 } : { x: -7, z: -4 };
+      let i = 0;
       for (const bot of bots) {
         if (!bot.alive || bot.team !== 'UMBRA' || bot.target) continue;
         const site = world.sites[siteKey];
-        bot.state = 'rotate';
-        setPath(bot, site.x, site.z);
+        if (i % 2 === 1) {
+          bot.viaTarget = new THREE.Vector3(site.x, 0, site.z);
+          bot.state = 'rotate';
+          setPath(bot, farDoor.x, farDoor.z);
+        } else {
+          bot.state = 'rotate';
+          setPath(bot, site.x, site.z);
+        }
+        i += 1;
       }
     },
     sendDefuser(bombPos) {
@@ -437,8 +586,47 @@ export function createBotManager(scene, world, ctx) {
       }
       if (best) {
         best.state = 'rotate';
-        setPath(best, bombPos.x, bombPos.z);
         best.defuseOnArrival = true;
+        best.pickupOnArrival = false;
+        best.viaTarget = null;
+        setPath(best, bombPos.x, bombPos.z);
+      }
+    },
+    sendCarrier(bombPos) {
+      // The charge is on the ground: the nearest alive ORBIT bot goes and
+      // picks it up, then pushes to its site.
+      let best = null;
+      let bestD = Infinity;
+      for (const bot of bots) {
+        if (!bot.alive || bot.team !== 'ORBIT' || bot.carriesBomb) continue;
+        const d = Math.hypot(bot.pos.x - bombPos.x, bot.pos.z - bombPos.z);
+        if (d < bestD) {
+          bestD = d;
+          best = bot;
+        }
+      }
+      if (best) {
+        best.state = 'rotate';
+        best.pickupOnArrival = true;
+        best.defuseOnArrival = false;
+        best.viaTarget = null;
+        setPath(best, bombPos.x, bombPos.z);
+      }
+    },
+    coverSite(siteKey, planter) {
+      // The charge is planted: the other alive ORBIT bots push to the site
+      // and hold it, so the planter is not left alone.
+      const site = world.sites[siteKey];
+      let i = 0;
+      for (const bot of bots) {
+        if (!bot.alive || bot.team !== 'ORBIT' || bot === planter) continue;
+        if (bot.state === 'plant' || bot.state === 'defuse' || bot.pickupOnArrival) continue;
+        bot.state = 'rotate';
+        bot.viaTarget = null;
+        // Spread around the site so they cover different angles.
+        const angle = (i / 2) * Math.PI * 2 + (siteKey === 'A' ? 0 : Math.PI / 3);
+        setPath(bot, site.x + Math.cos(angle) * 3, site.z + Math.sin(angle) * 3);
+        i += 1;
       }
     },
     dropBomb(bot) {

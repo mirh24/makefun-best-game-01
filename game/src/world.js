@@ -61,10 +61,10 @@ export function createWorld(scene) {
     // Containers (cover, steel blue).
     [6, 2.4, 2.4, -6, 1.2, 10, 'steel'],
     [6, 2.4, 2.4, 6, 1.2, 10, 'steel'],
-    [2.4, 2.4, 6, -6, 1.2, -2, 'steel'],
-    [2.4, 2.4, 6, 6, 1.2, -2, 'steel'],
-    [4, 2.4, 2.4, -16, 1.2, -4, 'steel'],
-    [4, 2.4, 2.4, 16, 1.2, -4, 'steel'],
+    [2.4, 2.4, 2.4, -5, 1.2, -2, 'steel'],
+    [2.4, 2.4, 2.4, 5, 1.2, -2, 'steel'],
+    [4, 2.4, 2.4, -18, 1.2, -4, 'steel'],
+    [4, 2.4, 2.4, 18, 1.2, -4, 'steel'],
     // Stacked container pair at mid (a second layer, 4.8 m high).
     [6, 2.4, 2.4, -4, 1.2, 4, 'steel'],
     [6, 2.4, 2.4, -4, 3.6, 4, 'steel'],
@@ -73,8 +73,8 @@ export function createWorld(scene) {
     [1.2, 1.2, 1.2, 2, 0.6, 8, 'hairline'],
     [1.2, 1.2, 1.2, -1.5, 0.6, -1, 'hairline'],
     [1.2, 1.2, 1.2, 1.5, 0.6, -1, 'hairline'],
-    [1.2, 1.2, 1.2, -12, 0.6, -8, 'hairline'],
-    [1.2, 1.2, 1.2, 12, 0.6, -8, 'hairline'],
+    [1.2, 1.2, 1.2, -9, 0.6, -9, 'hairline'],
+    [1.2, 1.2, 1.2, 9, 0.6, -9, 'hairline'],
     [1.2, 1.2, 1.2, -16, 0.6, -14, 'hairline'],
     [1.2, 1.2, 1.2, 16, 0.6, -14, 'hairline'],
     // Low platforms (0.5 m, jumpable vantage) in front of each site.
@@ -125,6 +125,30 @@ export function createWorld(scene) {
     zone.rotation.x = -Math.PI / 2;
     zone.position.set(site.x, 0.02, site.z);
     group.add(zone);
+  }
+
+  // Floating site letters, drawn once on a canvas (no files, no network),
+  // so the player can read which site is which from anywhere on the map.
+  function makeLabelSprite(text) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx2 = canvas.getContext('2d');
+    ctx2.fillStyle = '#37d3e0';
+    ctx2.font = 'bold 84px system-ui, sans-serif';
+    ctx2.textAlign = 'center';
+    ctx2.textBaseline = 'middle';
+    ctx2.fillText(text, 64, 68);
+    const tex = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(2.4, 2.4, 1);
+    return sprite;
+  }
+  for (const [key, site] of Object.entries(sites)) {
+    const label = makeLabelSprite(key);
+    label.position.set(site.x, 3.6, site.z);
+    group.add(label);
   }
 
   // Night lighting: a cold moon high overhead, warm amber floodlights over
@@ -182,28 +206,32 @@ export function createWorld(scene) {
     // Waypoint graph for bot navigation: id -> {x, z, links}.
     waypoints: {
       spawn: { x: 0, z: 14, links: ['s1', 's2', 'mid1'] },
-      s1: { x: -8, z: 12, links: ['spawn', 'longA1', 'mid1'] },
-      s2: { x: 8, z: 12, links: ['spawn', 'longB1', 'mid1'] },
-      mid1: { x: 0, z: 8, links: ['spawn', 's1', 's2', 'mid2'] },
-      mid2: { x: 0, z: 2, links: ['mid1', 'mid3', 'coverW', 'coverE', 'longA2', 'longB2'] },
-      mid3: { x: 0, z: -2, links: ['mid2', 'doorW', 'doorC', 'doorE'] },
-      doorW: { x: -7, z: -4, links: ['mid3', 'siteA2', 'longA3'] },
+      s1: { x: -8, z: 12, links: ['spawn'] },
+      s2: { x: 8, z: 12, links: ['spawn'] },
+      gapA: { x: -12, z: 0, links: ['coverW', 'longA1', 'longA2'] },
+      gapB: { x: 12, z: 0, links: ['coverE', 'longB1', 'longB2'] },
+      mid1: { x: 0, z: 8, links: ['spawn', 'mid2'] },
+      mid2: { x: 0, z: 2, links: ['mid1', 'mid3', 'coverW', 'coverE'] },
+      mid3: { x: 0, z: -2, links: ['mid2', 'doorC'] },
+      approachW: { x: -7, z: -1, links: ['coverW', 'longA2', 'doorW'] },
+      approachE: { x: 7, z: -1, links: ['coverE', 'longB2', 'doorE'] },
+      doorW: { x: -7, z: -4, links: ['approachW', 'siteA2', 'longA3'] },
       doorC: { x: 0, z: -4, links: ['mid3', 'siteA2', 'siteB2'] },
-      doorE: { x: 7, z: -4, links: ['mid3', 'siteB2', 'longB3'] },
-      coverW: { x: -6, z: 2, links: ['mid2', 'longA2'] },
-      coverE: { x: 6, z: 2, links: ['mid2', 'longB2'] },
-      longA1: { x: -16, z: 8, links: ['s1', 'longA2'] },
-      longA2: { x: -16, z: 0, links: ['longA1', 'longA3', 'coverW', 'mid2'] },
-      longA3: { x: -14, z: -8, links: ['longA2', 'siteA', 'doorW'] },
-      longB1: { x: 16, z: 8, links: ['s2', 'longB2'] },
-      longB2: { x: 16, z: 0, links: ['longB1', 'longB3', 'coverE', 'mid2'] },
-      longB3: { x: 14, z: -8, links: ['longB2', 'siteB', 'doorE'] },
-      siteA: { x: -14, z: -12, links: ['longA3', 'siteA2', 'backA'] },
-      siteA2: { x: -8, z: -10, links: ['siteA', 'doorW', 'doorC'] },
-      siteB: { x: 14, z: -12, links: ['longB3', 'siteB2', 'backB'] },
-      siteB2: { x: 8, z: -10, links: ['siteB', 'doorE', 'doorC'] },
-      backA: { x: -18, z: -14, links: ['siteA'] },
-      backB: { x: 18, z: -14, links: ['siteB'] },
+      doorE: { x: 7, z: -4, links: ['approachE', 'siteB2', 'longB3'] },
+      coverW: { x: -6, z: 2, links: ['mid2', 'longA2', 'gapA', 'approachW'] },
+      coverE: { x: 6, z: 2, links: ['mid2', 'longB2', 'gapB', 'approachE'] },
+      longA1: { x: -16, z: 8, links: ['gapA', 'longA2'] },
+      longA2: { x: -16, z: 0, links: ['longA1', 'coverW', 'gapA', 'approachW'] },
+      longA3: { x: -12, z: -8, links: ['siteA', 'doorW'] },
+      longB1: { x: 16, z: 8, links: ['gapB', 'longB2'] },
+      longB2: { x: 16, z: 0, links: ['longB1', 'coverE', 'gapB', 'approachE'] },
+      longB3: { x: 12, z: -8, links: ['siteB', 'doorE'] },
+      siteA: { x: -14, z: -12, links: ['longA3', 'backA'] },
+      siteA2: { x: -8, z: -10, links: ['doorW', 'doorC'] },
+      siteB: { x: 14, z: -12, links: ['longB3', 'backB'] },
+      siteB2: { x: 8, z: -10, links: ['doorE', 'doorC'] },
+      backA: { x: -15, z: -14, links: ['siteA'] },
+      backB: { x: 14.5, z: -14, links: ['siteB'] },
     },
   };
 }

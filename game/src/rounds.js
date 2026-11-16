@@ -9,7 +9,7 @@
 // - defenders react a little faster and shoot a little truer every round;
 // - every third round is a SURGE round: defenders move faster and press
 //   harder, and the HUD says so.
-export const BUY_TIME = 15;
+export const BUY_TIME = 12;
 export const ROUND_TIME = 100;
 export const END_TIME = 5;
 export const WIN_ROUNDS = 5;

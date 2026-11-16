@@ -172,7 +172,24 @@ const botCtx = {
     bomb.plantAt(bot.site, bot.pos);
     audio.plantDone();
     hud.setObjective(`CHARGE PLANTED AT ${bot.site} — DEFEND IT`, true);
+    // Defenders converge on the site (from two doors), attackers push up
+    // to cover the plant, and the nearest defender is sent to defuse.
+    bots.rotateToSite(bot.site);
+    bots.coverSite(bot.site, bot);
     bots.sendDefuser(bomb.state.pos);
+  },
+  onPickup(bot) {
+    // A bot picked up the dropped charge — unless someone else grabbed it
+    // first, in which case it just rejoins the push.
+    if (bomb.state.mode === 'dropped') {
+      bomb.giveTo(bot);
+      bots.giveBomb(bot);
+      hud.setObjective(`CHARGE RECOVERED BY ${bot.name} — ESCORT TO A OR B`, false);
+    } else {
+      bot.state = 'advance';
+      const site = world.sites[bot.site];
+      bots.setPath(bot, site.x, site.z);
+    }
   },
   onDefuse(bot) {
     bomb.state.mode = 'defused';
@@ -209,10 +226,19 @@ function applyDamage(target, damage, headshot, shooter) {
       playerProxy.alive = false;
       S.deaths += 1;
       S.streak = 0;
+      // The charge must not die with the player: drop it where they fell
+      // so a teammate can pick it up and the round can still be won.
+      if (S.carryingBomb) {
+        S.carryingBomb = false;
+        bomb.dropAt(player.state.position);
+        hud.setObjective('CHARGE DROPPED — PICK IT UP (E)', true);
+        bots.sendCarrier(bomb.state.pos);
+      }
       const killer = shooter ? shooter.name : 'UMBRA';
       hud.killFeed(killer, 'YOU', headshot, false, true);
       audio.roundLose();
       enterSpectate();
+      checkRoundEnd();
     }
     return;
   }
@@ -220,6 +246,7 @@ function applyDamage(target, damage, headshot, shooter) {
   const bot = bots.bots.find((b) => b.name === target.name);
   if (!bot || !bot.alive) return;
   bot.health -= damage;
+  bot.flashUntil = now + 0.12;
   const shooterIsPlayer = shooter && shooter.isPlayer;
   if (shooterIsPlayer) {
     S.damageDealt += damage;
@@ -237,10 +264,13 @@ function killBot(bot, shooter, headshot) {
   const shooterIsPlayer = shooter && shooter.isPlayer;
   const killerName = shooterIsPlayer ? 'YOU' : shooter ? shooter.name : 'ORBIT';
   hud.killFeed(killerName, bot.name, headshot, shooterIsPlayer, false);
-  if (bot.carriesBomb) {
+  // Only the bot that actually holds the charge drops it. (On round 1 the
+  // player carries it, so a flagged bot dying must not yank it away.)
+  if (bot.carriesBomb && bomb.state.carrier === bot) {
     bots.dropBomb(bot);
     bomb.dropAt(bot.pos);
     hud.setObjective('CHARGE DROPPED — PICK IT UP (E)', true);
+    bots.sendCarrier(bomb.state.pos);
   }
   if (shooterIsPlayer) {
     S.kills += 1;
@@ -453,7 +483,9 @@ function startRound() {
     site: world.defenderSpawns[i].site,
   }));
   const carrier = ATTACKER_NAMES[Math.floor(rng() * ATTACKER_NAMES.length)];
-  bots.spawnRound(attackers, defenders, carrier, diff);
+  // Round 1 the player carries the charge, so no bot is flagged as carrier
+  // — otherwise the first bot death would drop a bomb the player still holds.
+  bots.spawnRound(attackers, defenders, S.round === 1 ? null : carrier, diff);
   bomb.reset();
   // The player carries the charge on rounds where no bot does — simpler: the
   // player always starts with the charge on round 1, bots carry it after.
@@ -655,6 +687,8 @@ function updateInteract(dt, keys) {
           audio.plantDone();
           hud.setObjective(`CHARGE PLANTED AT ${site.key} — DEFEND IT`, true);
           hud.setMoney(S.money);
+          bots.rotateToSite(site.key);
+          bots.coverSite(site.key, null);
           bots.sendDefuser(bomb.state.pos);
           S.plantProgress = 0;
           hud.setProgress(0, null);
@@ -945,6 +979,9 @@ window.__game = {
   },
   get weapons() {
     return weapons.state;
+  },
+  get bomb() {
+    return bomb.state;
   },
   get weaponReady() {
     return weapons.ready();
