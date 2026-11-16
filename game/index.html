@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NIGHTSHIFT — Tactical FPS</title>
+<style>
+  :root {
+    --canvas: #0b1220;
+    --surface: #1a2233;
+    --hairline: #2e3d55;
+    --ink: #e8f0f8;
+    --muted: #8ba0b8;
+    --accent: #ffb02e;
+    --cyan: #37d3e0;
+    --blue: #3fa9f5;
+    --red: #ff5a3c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--canvas); }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; color: var(--ink); }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+  .hud { position: absolute; inset: 0; }
+
+  .crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 24px; height: 24px; }
+  .crosshair::before, .crosshair::after { content: ''; position: absolute; background: var(--ink); }
+  .crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
+  .crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+  .crosshair .dot { position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; background: var(--accent); border-radius: 50%; transform: translate(-50%, -50%); z-index: 1; }
+
+  .hitmarker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(45deg); font-size: 28px; color: var(--ink); opacity: 0; text-shadow: 0 0 6px #000; }
+  .hitmarker.kill { color: var(--red); }
+  .hitmarker.show { opacity: 1; }
+
+  .damage { position: absolute; inset: 0; box-shadow: inset 0 0 120px 40px rgba(255, 60, 40, 0.55); opacity: 0; }
+  .damage.show { animation: dmg 0.5s ease-out; }
+  @keyframes dmg { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+  .streak { position: absolute; left: 50%; top: 22%; transform: translateX(-50%); text-align: center; opacity: 0; }
+  .streak.show { animation: streakpop 1.6s ease-out; }
+  @keyframes streakpop { 0% { opacity: 0; transform: translateX(-50%) scale(0.7); } 15% { opacity: 1; transform: translateX(-50%) scale(1.1); } 30% { transform: translateX(-50%) scale(1); } 80% { opacity: 1; } 100% { opacity: 0; } }
+  .streak-text { display: block; font-size: 34px; font-weight: 900; letter-spacing: 4px; color: var(--accent); text-shadow: 0 2px 12px #000; }
+  .streak-bonus { display: block; font-size: 16px; color: var(--cyan); font-weight: 700; }
+
+  .timer { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 26px; font-weight: 800; letter-spacing: 2px; background: rgba(11, 18, 32, 0.72); padding: 4px 16px; border: 1px solid var(--hairline); border-radius: 6px; }
+  .timer.warn { color: var(--red); border-color: var(--red); }
+
+  .teams { position: absolute; top: 14px; left: 14px; font-size: 17px; font-weight: 800; letter-spacing: 1px; background: rgba(11, 18, 32, 0.72); padding: 6px 12px; border: 1px solid var(--hairline); border-radius: 6px; }
+  .teams .orbit { color: var(--blue); }
+  .teams .umbra { color: var(--red); }
+  .teams .sep { color: var(--muted); margin: 0 6px; }
+
+  .kills { position: absolute; top: 60px; right: 14px; text-align: right; font-size: 14px; }
+  .kill-line { background: rgba(11, 18, 32, 0.72); border: 1px solid var(--hairline); border-radius: 4px; padding: 3px 8px; margin-bottom: 4px; color: var(--muted); }
+  .kill-line.me { color: var(--accent); }
+  .kill-line.died { color: var(--red); }
+
+  .objective { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); font-size: 15px; font-weight: 700; color: var(--cyan); background: rgba(11, 18, 32, 0.72); padding: 5px 14px; border: 1px solid var(--hairline); border-radius: 6px; white-space: nowrap; }
+  .objective.alert { color: var(--accent); border-color: var(--accent); }
+
+  .progress { position: absolute; left: 50%; top: 58%; transform: translateX(-50%); width: 300px; display: none; }
+  .progress.visible { display: block; }
+  .progress .bar { height: 10px; background: var(--accent); border-radius: 5px; width: 0%; transition: width 0.1s linear; }
+  .progress .label { text-align: center; font-size: 14px; font-weight: 700; margin-top: 6px; text-shadow: 0 1px 4px #000; }
+
+  .bottom-left { position: absolute; left: 14px; bottom: 14px; font-size: 18px; background: rgba(11, 18, 32, 0.72); padding: 8px 14px; border: 1px solid var(--hairline); border-radius: 6px; }
+  .bottom-left .label { color: var(--muted); font-size: 13px; margin-right: 8px; }
+  .bottom-left .value { font-size: 26px; font-weight: 900; }
+  .bottom-left .value.low { color: var(--red); }
+  .bottom-left .armor { color: var(--cyan); font-size: 13px; margin-left: 10px; }
+  .bottom-left .money { color: var(--accent); font-size: 16px; font-weight: 800; margin-left: 12px; }
+
+  .bottom-right { position: absolute; right: 14px; bottom: 14px; text-align: right; background: rgba(11, 18, 32, 0.72); padding: 8px 14px; border: 1px solid var(--hairline); border-radius: 6px; }
+  .bottom-right .weapon { display: block; font-size: 13px; color: var(--muted); letter-spacing: 1px; }
+  .bottom-right .mag { font-size: 26px; font-weight: 900; }
+  .bottom-right .nades { color: var(--accent); font-size: 15px; margin-left: 10px; }
+
+  .compass { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); font-size: 15px; font-weight: 700; color: var(--cyan); background: rgba(11, 18, 32, 0.72); padding: 6px 12px; border: 1px solid var(--hairline); border-radius: 6px; }
+
+  .buy-menu { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 460px; background: rgba(11, 18, 32, 0.94); border: 1px solid var(--accent); border-radius: 10px; padding: 18px; display: none; pointer-events: auto; }
+  .buy-menu.open { display: block; }
+  .buy-title { font-size: 22px; font-weight: 900; letter-spacing: 3px; color: var(--accent); text-align: center; margin-bottom: 12px; }
+  .buy-item { display: flex; width: 100%; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--hairline); color: var(--ink); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; font-size: 15px; text-align: left; }
+  .buy-item:hover { border-color: var(--accent); }
+  .buy-item .name { font-weight: 800; min-width: 110px; }
+  .buy-item .desc { flex: 1; color: var(--muted); font-size: 13px; }
+  .buy-item .price { color: var(--accent); font-weight: 800; }
+  .buy-item.owned .price { color: var(--cyan); }
+  .buy-item.cant { opacity: 0.55; }
+  .buy-hint { text-align: center; color: var(--muted); font-size: 13px; }
+
+  .lock-hint { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 20px; font-weight: 700; background: rgba(11, 18, 32, 0.8); padding: 10px 20px; border: 1px solid var(--hairline); border-radius: 8px; display: none; }
+
+  .overlay { position: absolute; inset: 0; background: rgba(5, 8, 15, 0.78); display: none; align-items: center; justify-content: center; pointer-events: auto; }
+  .overlay.visible { display: flex; }
+  .panel { max-width: 640px; width: 92%; text-align: center; background: rgba(11, 18, 32, 0.92); border: 1px solid var(--hairline); border-radius: 14px; padding: 34px 30px; }
+  .title-kicker { color: var(--cyan); letter-spacing: 4px; font-size: 14px; font-weight: 800; margin-bottom: 8px; }
+  .title { font-size: 64px; font-weight: 900; letter-spacing: 6px; line-height: 1; color: var(--ink); text-shadow: 0 0 30px rgba(55, 211, 224, 0.35); }
+  .title.small { font-size: 40px; }
+  .subtitle { color: var(--muted); font-size: 17px; margin-top: 10px; }
+  .rules { margin: 20px 0; text-align: left; font-size: 15px; line-height: 1.7; }
+  .rules b { color: var(--accent); }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px 16px; justify-content: center; font-size: 13px; color: var(--muted); margin-bottom: 22px; }
+  .controls b { color: var(--ink); }
+  .big { background: var(--accent); color: #1a1206; border: none; border-radius: 8px; padding: 14px 34px; font-size: 18px; font-weight: 900; letter-spacing: 2px; cursor: pointer; }
+  .big:hover { filter: brightness(1.1); }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 14px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"></div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
